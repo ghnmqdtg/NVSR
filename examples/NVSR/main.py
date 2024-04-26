@@ -9,15 +9,18 @@ from ssr_eval import SSR_Eval_Helper, BasicTestee
 torch.manual_seed(234)
 EPS = 1e-9
 
+
 def to_log(input):
     assert torch.sum(input < 0) == 0, (
         str(input) + " has negative values counts " + str(torch.sum(input < 0))
     )
     return torch.log10(torch.clip(input, min=1e-8))
 
+
 def from_log(input):
     input = torch.clip(input, min=-np.inf, max=5)
     return 10**input
+
 
 def trim_center(est, ref):
     diff = np.abs(est.shape[-1] - ref.shape[-1])
@@ -162,12 +165,24 @@ class NVSRPaddingPostProcTestee(NVSRBaseTestee):
             out = self.postprocessing(x, out)
         return out
 
+
 if __name__ == "__main__":
     import soundfile as sf
 
-    if(torch.cuda.is_available()): device = "cuda"
-    else: device="cpu"
-    
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    input_sr = 44100
+    output_sr = 44100
+    evaluation_sr = 44100
+    cutoff_freq = [4000, 6000, 8000, 12000]
+
+    # Make directory to save the processed results
+    for freq in cutoff_freq:
+        os.makedirs(f"test_samples/{evaluation_sr}/{freq*2}", exist_ok=True)
+
     for test_name in ["NVSRPostProcTestee"]:
         testee = eval(test_name)(device=device)
         helper = SSR_Eval_Helper(
@@ -177,8 +192,10 @@ if __name__ == "__main__":
             output_sr=44100,
             evaluation_sr=44100,
             setting_fft={
-                "cutoff_freq": [1000, 2000, 4000, 6000, 8000, 12000],
+                # "cutoff_freq": [1000, 2000, 4000, 6000, 8000, 12000],
+                "cutoff_freq": cutoff_freq,
             },
             save_processed_result=True,
+            device=device,
         )
         helper.evaluate(limit_test_nums=2, limit_test_speaker=-1)

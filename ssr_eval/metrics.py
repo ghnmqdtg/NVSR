@@ -5,6 +5,8 @@
 
 import librosa
 import torch
+import torch.nn as nn
+import torchaudio
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 from ssr_eval.utils import *
@@ -17,15 +19,23 @@ class AudioMetrics:
         self.rate = rate
         self.hop_length = int(rate / 100)
         self.n_fft = int(2048 / (44100 / rate))
+        self.stft = STFTMag(nfft=self.n_fft, hop=self.hop_length)
 
     def read(self, est, target):
-        est, _ = librosa.load(est, sr=self.rate, mono=True)
-        target, _ = librosa.load(target, sr=self.rate, mono=True)
+        # Use librosa to read the file
+        # est, _ = librosa.load(est, sr=self.rate, mono=True)
+        # target, _ = librosa.load(target, sr=self.rate, mono=True)
+
+        # Use torchaudio to read the file
+        est, _ = torchaudio.load(est)
+        target, _ = torchaudio.load(target)
+
         return est, target
 
     def wav_to_spectrogram(self, wav):
         f = np.abs(librosa.stft(wav, hop_length=self.hop_length, n_fft=self.n_fft))
         f = np.transpose(f, (1, 0))
+        # f.shape = torch.Size([1, 1, time, freq]), where freq == (1 + n_fft/2)
         f = torch.tensor(f[None, None, ...])
         return f
 
@@ -48,11 +58,14 @@ class AudioMetrics:
         ), "Error: the offset %s is too large, check the code please" % (offset)
         return x, y
 
-    def evaluation(self, est, target, file):
+    def evaluation(self, est, target, file, cutoff_freq, device="cuda"):
         """evaluate between two audio
         Args:
             est (str or np.array): _description_
             target (str or np.array): _description_
+            file (str): _description_
+            cutoff_freq (int): The cutoff frequency for lowpass filter
+            device (str, optional): Defaults to "cuda".
 
         Raises:
             ValueError: _description_
@@ -67,17 +80,17 @@ class AudioMetrics:
             )
         if type(est) == type(""):
             est_wav, target_wav = self.read(est, target)
+            est_wav = est_wav.to(device)
+            target_wav = est_wav.to(device)
         else:
             assert len(list(est.shape)) == 1 and len(list(target.shape)) == 1, (
                 "The input numpy array shape should be [samples,]. Got input shape %s and %s. "
                 % (est.shape, target.shape)
             )
             est_wav, target_wav = est, target
-
-        # target_spec_path = os.path.join(os.path.dirname(file), os.path.splitext(os.path.basename(file))[0]+"_proc_%s.pt" % (self.rate))
-        # if(os.path.exists(target_spec_path)):
-        #     target_sp = torch.load(target_spec_path)
-        # else:
+            # Convert to torch tensor
+            est_wav = torch.tensor(est_wav).to(device)
+            target_wav = torch.tensor(target_wav).to(device)
 
         assert (
             abs(target_wav.shape[0] - est_wav.shape[0]) < 100
@@ -89,27 +102,36 @@ class AudioMetrics:
         min_len = min(target_wav.shape[0], est_wav.shape[0])
         target_wav, est_wav = target_wav[:min_len], est_wav[:min_len]
 
-        target_sp = self.wav_to_spectrogram(target_wav)
-        est_sp = self.wav_to_spectrogram(est_wav)
-
         result = {}
 
+        # Highcut frequency = int((1 + n_fft/2)
+        hf = int((1 + self.n_fft / 2) * (cutoff_freq / self.rate))
+
         # frequency domain
-        result["lsd"] = self.lsd(est_sp.clone(), target_sp.clone())
-        result["log_sispec"] = self.sispec(
-            to_log(est_sp.clone()), to_log(target_sp.clone())
+        result["lsd"], result["lsd_hf"], result["lsd_lf"] = self.lsd(
+            est_wav, target_wav, hf
         )
-        result["sispec"] = self.sispec(est_sp.clone(), target_sp.clone())
-        result["ssim"] = self.ssim(est_sp.clone(), target_sp.clone())
 
         for key in result:
             result[key] = float(result[key])
         return result
 
-    def lsd(self, est, target):
-        lsd = torch.log10(target**2 / ((est + EPS) ** 2) + EPS) ** 2
-        lsd = torch.mean(torch.mean(lsd, dim=3) ** 0.5, dim=2)
-        return lsd[..., None, None]
+    def lsd(self, est, target, hf):
+        """
+        Function to calculate the log-spectral distortion (also for high and low frequency components)
+
+        Args:
+            est (torch.Tensor): estimated waveform
+            target (torch.Tensor): target waveform
+            hf (int): highcut frequency
+        """
+        sp = torch.log10(self.stft(est).square().clamp(1e-8))
+        st = torch.log10(self.stft(target).square().clamp(1e-8))
+        return (
+            (sp - st).square().mean(dim=1).sqrt().mean(),
+            (sp[:, hf:, :] - st[:, hf:, :]).square().mean(dim=1).sqrt().mean(),
+            (sp[:, :hf, :] - st[:, :hf, :]).square().mean(dim=1).sqrt().mean(),
+        )
 
     def sispec(self, est, target):
         # in log scale
@@ -132,13 +154,33 @@ class AudioMetrics:
         return torch.tensor(res)[..., None, None]
 
 
+class STFTMag(nn.Module):
+    def __init__(self, nfft=1024, hop=256):
+        super().__init__()
+        self.nfft = nfft
+        self.hop = hop
+        self.register_buffer("window", torch.hann_window(nfft), False)
+
+    # x: [B,T] or [T]
+    @torch.no_grad()
+    def forward(self, x):
+        T = x.shape[-1]
+        self.window = self.window.to(x.device)
+        stft = torch.stft(
+            x, self.nfft, self.hop, window=self.window, return_complex=True
+        )  # [B, F, TT]
+        #   return_complex=False)  #[B, F, TT,2]
+        mag = torch.sqrt(stft.real.pow(2) + stft.imag.pow(2))
+        return mag
+
+
 if __name__ == "__main__":
     import numpy as np
 
     au = AudioMetrics(rate=44100)
     # path1 = "old/out.wav"
-    path1 = "eeeeee.wav"
+    path1 = "p225_001.wav"
     # path2 = "old/target.wav"
-    path2 = "targete.wav"
-    result = au.evaluation(path2, path1, path1)
+    path2 = "p225_001.wav"
+    result = au.evaluation(path2, path1, path1, 8000, device="cpu")
     print(result)
