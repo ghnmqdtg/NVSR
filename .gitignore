@@ -21,5 +21,6 @@ testees*
 build*
 dist*
 *.egg-info
+*.out
 
 test_samples
