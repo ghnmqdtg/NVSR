@@ -51,6 +51,9 @@ class BasicTestee:
         # return: [sample, sample]
         return x
 
+    def forward(self, x):
+        return self.infer(x)
+
 
 """_summary_
 test
@@ -182,7 +185,10 @@ class SSR_Eval_Helper:
                 continue  # MacOS files
             if "p" not in speaker and "s" not in speaker:
                 continue
-            if limit_test_speaker > 0 and len(final_result.keys()) >= limit_test_speaker:
+            if (
+                limit_test_speaker > 0
+                and len(final_result.keys()) >= limit_test_speaker
+            ):
                 break
             print("Speaker:", speaker)
             final_result[speaker] = {}

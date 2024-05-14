@@ -6,6 +6,11 @@ from nvsr_unet import NVSR as Model
 import numpy as np
 from ssr_eval import SSR_Eval_Helper, BasicTestee
 
+from copy import deepcopy
+from fvcore.nn import flop_count, parameter_count
+from torchinfo import summary
+
+
 torch.manual_seed(234)
 EPS = 1e-9
 
@@ -95,6 +100,9 @@ class NVSRBaseTestee(BasicTestee):
     def infer(self, x):
         return x
 
+    def forward(self, x):
+        return self.infer(x)
+
 
 class NVSRTestee(NVSRBaseTestee):
     def __init__(self, device) -> None:
@@ -128,6 +136,34 @@ class NVSRPostProcTestee(NVSRBaseTestee):
             out = np.squeeze(out)
             out = self.postprocessing(x, out)
         return out
+
+    @torch.no_grad()
+    def flops(self, x):
+        supported_ops = {
+            "aten::silu": None,  # as relu is in _IGNORED_OPS
+            "aten::gelu": None,  # as relu is in _IGNORED_OPS
+            "aten::neg": None,  # as relu is in _IGNORED_OPS
+            "aten::exp": None,  # as relu is in _IGNORED_OPS
+            "aten::flip": None,  # as permute is in _IGNORED_OPS
+        }
+        model = deepcopy(self.model)
+        model.cuda()
+
+        segment = torch.Tensor(x.copy()).to(self.device)[None, ...]
+        _, mel_noisy = self.pre(segment)
+
+        params = parameter_count(model)[""]
+        Gflops, unsupported = flop_count(
+            model=model, inputs=(mel_noisy), supported_ops=supported_ops
+        )
+        statics = summary(model, input_data=[mel_noisy], verbose=0)
+        del model
+        torch.cuda.empty_cache()
+
+        # Return the number of parameters and FLOPs
+        return (
+            f"{statics}\nparams {params/1e6:.2f}M, GFLOPs {sum(Gflops.values()):.2f}\n"
+        )
 
 
 class NVSRPaddingPostProcTestee(NVSRBaseTestee):
@@ -185,6 +221,9 @@ if __name__ == "__main__":
 
     for test_name in ["NVSRPostProcTestee"]:
         testee = eval(test_name)(device=device)
+        # Generate random 96076 samples with numpy
+        test_input = np.random.rand(96076)
+        print(testee.flops(test_input))
         helper = SSR_Eval_Helper(
             testee,
             test_name=test_name,
